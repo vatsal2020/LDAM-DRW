@@ -68,12 +68,13 @@ parser.add_argument('--gpu', default=None, type=int,
                     help='GPU id to use.')
 parser.add_argument('--root_log',type=str, default='log')
 parser.add_argument('--root_model', type=str, default='checkpoint')
+parser.add_argument('--bsgdparam', default=100, type=int, help='threshold for BSGD')
 best_acc1 = 0
 
 
 def main():
     args = parser.parse_args()
-    args.store_name = '_'.join([args.dataset, args.arch, args.loss_type, args.train_rule, args.imb_type, str(args.imb_factor), args.exp_str])
+    args.store_name = '_'.join([args.dataset, args.arch, args.loss_type, args.train_rule, args.imb_type, str(args.imb_factor), args.exp_str, 'BSGD_param', str(args.bsgdparam)])
     prepare_folders(args)
     if args.seed is not None:
         random.seed(args.seed)
@@ -180,6 +181,9 @@ def main_worker(gpu, ngpus_per_node, args):
     with open(os.path.join(args.root_log, args.store_name, 'args.txt'), 'w') as f:
         f.write(str(args))
     tf_writer = SummaryWriter(log_dir=os.path.join(args.root_log, args.store_name))
+    # BSGD params
+    args.num_class = [0] * 10
+    args.epoch1 = 0
     for epoch in range(args.start_epoch, args.epochs):
         adjust_learning_rate(optimizer, epoch, args)
 
@@ -250,7 +254,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args, log, tf_writer
     losses = AverageMeter('Loss', ':.4e')
     top1 = AverageMeter('Acc@1', ':6.2f')
     top5 = AverageMeter('Acc@5', ':6.2f')
-    num_class = [0] * 10
+    # num_class = [0] * 10
     
     # switch to train mode
     model.train()
@@ -273,22 +277,24 @@ def train(train_loader, model, criterion, optimizer, epoch, args, log, tf_writer
             target1 = target
             output1 = model(input1)
             loss1 = criterion(output1, target1)
-            tot_obs = np.sum(num_class)
+            tot_obs = np.sum(args.num_class)
             for i_t in range(len(threshold)):
-		threshold[i_t] = np.log(100) * (0.9 - (1.0 - num_class[i_t]/(1.0 + tot_obs)))
+		threshold[i_t] = np.log(args.bsgdparam) * (0.9 - (1.0 - args.num_class[i_t]/(1.0 + tot_obs)))
 	    #print(threshold, num_class)
 	    v0 = loss1.cpu().detach().numpy() 
             v1 = [threshold[t_t] for t_t in target1]
 	    index1 = v0 > v1
 	    #print(np.sum(index1))
 	    #print(v0, np.sum(index1))
-            input = input1[index1, :, :, :]
-            target = target[index1]
+            input = input1[index1, :, :, :].clone()
+            target = target1[index1].clone()
+	    #print("CP1", input2.shape, target2.shape)
             for out_val in target:
-		num_class[out_val] += 1
-
-
-
+		args.num_class[out_val] += 1
+	    args.epoch1 += np.sum(args.num_class)/12406.0
+	else:
+	    args.epoch1 = epoch
+ 	    
 
         # compute output
         output = model(input)
@@ -317,16 +323,17 @@ def train(train_loader, model, criterion, optimizer, epoch, args, log, tf_writer
                       'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
                       'Prec@1 {top1.val:.3f} ({top1.avg:.3f})\t'
                       'Prec@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
-                epoch, i, len(train_loader), np.sum(num_class), batch_time=batch_time,
+                epoch, i, len(train_loader), np.sum(args.num_class), batch_time=batch_time,
                 data_time=data_time, loss=losses, top1=top1, top5=top5, lr=optimizer.param_groups[-1]['lr'] * 0.1))  # TODO
             print(output)
             log.write(output + '\n')
             log.flush()
 
-    tf_writer.add_scalar('loss/train', losses.avg, epoch)
-    tf_writer.add_scalar('acc/train_top1', top1.avg, epoch)
-    tf_writer.add_scalar('acc/train_top5', top5.avg, epoch)
-    tf_writer.add_scalar('lr', optimizer.param_groups[-1]['lr'], epoch)
+    tf_writer.add_scalar('loss/train', losses.avg, args.epoch1)
+    tf_writer.add_scalar('acc/train_top1', top1.avg, args.epoch1)
+    tf_writer.add_scalar('acc/train_top5', top5.avg, args.epoch1)
+    tf_writer.add_scalar('lr', optimizer.param_groups[-1]['lr'], args.epoch1)
+    tf_writer.add_scalar('num_class', sum(args.num_class), args.epoch1)
 
 def validate(val_loader, model, criterion, epoch, args, log=None, tf_writer=None, flag='val'):
     batch_time = AverageMeter('Time', ':6.3f')
@@ -387,10 +394,10 @@ def validate(val_loader, model, criterion, epoch, args, log=None, tf_writer=None
             log.write(out_cls_acc + '\n')
             log.flush()
 
-        tf_writer.add_scalar('loss/test_'+ flag, losses.avg, epoch)
-        tf_writer.add_scalar('acc/test_' + flag + '_top1', top1.avg, epoch)
-        tf_writer.add_scalar('acc/test_' + flag + '_top5', top5.avg, epoch)
-        tf_writer.add_scalars('acc/test_' + flag + '_cls_acc', {str(i):x for i, x in enumerate(cls_acc)}, epoch)
+        tf_writer.add_scalar('loss/test_'+ flag, losses.avg, args.epoch1)
+        tf_writer.add_scalar('acc/test_' + flag + '_top1', top1.avg, args.epoch1)
+        tf_writer.add_scalar('acc/test_' + flag + '_top5', top5.avg, args.epoch1)
+        tf_writer.add_scalars('acc/test_' + flag + '_cls_acc', {str(i):x for i, x in enumerate(cls_acc)}, args.epoch1)
 
     return top1.avg
 
