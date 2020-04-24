@@ -213,7 +213,9 @@ def main_worker(gpu, ngpus_per_node, args):
             criterion = LDAMLoss(cls_num_list=cls_num_list, max_m=0.5, s=30, weight=per_cls_weights).cuda(args.gpu)
         elif args.loss_type == 'Focal':
             criterion = FocalLoss(weight=per_cls_weights, gamma=1).cuda(args.gpu)
-        else:
+        elif args.loss_type == 'BSGD':
+	    criterion = nn.CrossEntropyLoss(weight=per_cls_weights).cuda(args.gpu)
+	else:
             warnings.warn('Loss type is not listed')
             return
 
@@ -248,6 +250,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args, log, tf_writer
     losses = AverageMeter('Loss', ':.4e')
     top1 = AverageMeter('Acc@1', ':6.2f')
     top5 = AverageMeter('Acc@5', ':6.2f')
+    num_class = [0] * 10
     
     # switch to train mode
     model.train()
@@ -256,10 +259,36 @@ def train(train_loader, model, criterion, optimizer, epoch, args, log, tf_writer
     for i, (input, target) in enumerate(train_loader):
         # measure data loading time
         data_time.update(time.time() - end)
+	threshold = [0] * 10
+
+		
 
         if args.gpu is not None:
             input = input.cuda(args.gpu, non_blocking=True)
+
         target = target.cuda(args.gpu, non_blocking=True)
+
+	if args.loss_type == 'BSGD':
+            input1 = input
+            target1 = target
+            output1 = model(input1)
+            loss1 = criterion(output1, target1)
+            tot_obs = np.sum(num_class)
+            for i_t in range(len(threshold)):
+		threshold[i_t] = np.log(100) * (0.9 - (1.0 - num_class[i_t]/(1.0 + tot_obs)))
+	    #print(threshold, num_class)
+	    v0 = loss1.cpu().detach().numpy() 
+            v1 = [threshold[t_t] for t_t in target1]
+	    index1 = v0 > v1
+	    #print(np.sum(index1))
+	    #print(v0, np.sum(index1))
+            input = input1[index1, :, :, :]
+            target = target[index1]
+            for out_val in target:
+		num_class[out_val] += 1
+
+
+
 
         # compute output
         output = model(input)
@@ -281,13 +310,14 @@ def train(train_loader, model, criterion, optimizer, epoch, args, log, tf_writer
         end = time.time()
 
         if i % args.print_freq == 0:
-            output = ('Epoch: [{0}][{1}/{2}], lr: {lr:.5f}\t'
+	    print(input.shape, target.shape)
+            output = ('Epoch: [{0}][{1}/{2}] {3}, lr: {lr:.5f}\t'
                       'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                       'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
                       'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
                       'Prec@1 {top1.val:.3f} ({top1.avg:.3f})\t'
                       'Prec@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
-                epoch, i, len(train_loader), batch_time=batch_time,
+                epoch, i, len(train_loader), np.sum(num_class), batch_time=batch_time,
                 data_time=data_time, loss=losses, top1=top1, top5=top5, lr=optimizer.param_groups[-1]['lr'] * 0.1))  # TODO
             print(output)
             log.write(output + '\n')
@@ -318,6 +348,7 @@ def validate(val_loader, model, criterion, epoch, args, log=None, tf_writer=None
             # compute output
             output = model(input)
             loss = criterion(output, target)
+	    
 
             # measure accuracy and record loss
             acc1, acc5 = accuracy(output, target, topk=(1, 5))

@@ -1,5 +1,7 @@
 # Project files
 data/
+checkpoint/
+log/
 *.pdf
 
 # IPython notebook checkpoints
